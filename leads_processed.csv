@@ -1,4 +1,4 @@
 name,email,score,source,ai_decision,ai_reason
-Ion Popescu,ion@firma.ro,85,Facebook Ads,Error,Could not process lead
-Maria Ionescu,maria@firma.ro,45,Google Ads,Error,Could not process lead
-Andrei Stan,andrei@firma.ro,92,Referral,Error,Could not process lead
+Ion Popescu,ion@firma.ro,85,Facebook Ads,Qualified,High score of 85 indicates strong purchase intent.
+Maria Ionescu,maria@firma.ro,45,Google Ads,Nurture,"Below qualification threshold score, needs engagement building."
+Andrei Stan,andrei@firma.ro,92,Referral,Qualified,High score and referral source indicate strong fit.

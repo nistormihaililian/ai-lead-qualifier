@@ -1,0 +1,4 @@
+name,email,score,source,ai_decision,ai_reason
+Elena Dumitrescu,elena@testfirma.ro,30,Cold Call,Nurture,Low score indicates insufficient buying intent or engagement level.
+Vasile Munteanu,vasile@testfirma.ro,78,Website Form,Qualified,High score of 78 indicates strong purchase intent.
+Cristina Radu,cristina@testfirma.ro,95,Referral,Qualified,High score and referral source indicate strong sales potential.
