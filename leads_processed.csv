@@ -1,4 +1,4 @@
 name,email,score,source,ai_decision,ai_reason
-Ion Popescu,ion@firma.ro,85,Facebook Ads,Qualified,High score of 85 indicates strong purchase intent.
-Maria Ionescu,maria@firma.ro,45,Google Ads,Nurture,"Below qualification threshold score, needs engagement building."
+Ion Popescu,ion@firma.ro,85,Facebook Ads,Qualified,High score of 85 indicates strong purchase intent and readiness.
+Maria Ionescu,maria@firma.ro,45,Google Ads,Nurture,"Low score indicates early stage, needs engagement first"
 Andrei Stan,andrei@firma.ro,92,Referral,Qualified,High score and referral source indicate strong fit.
