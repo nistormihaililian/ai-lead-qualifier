@@ -1,55 +1,97 @@
-1. AI Lead Qualifier
-Automated lead qualification system that reads leads from a CSV file, uses Claude (Anthropic API) to analyze each lead's context and decide whether it's sales-ready or needs nurturing, then writes the enriched results to a new CSV.
+# AI Lead Qualifier
 
-Built as a foundation for larger agent-based automation systems.
+A lead qualification pipeline built as a **LangGraph state machine**. Each lead flows through a graph of nodes — API call, retry routing, response parsing — instead of a linear script with error handling bolted on.
 
-2. What it does
+Reads leads from a CSV, has Claude reason about each one's context (score + source, not a fixed threshold), and writes back an enriched CSV with the AI's decision and reasoning.
 
-- Reads leads from `leads.csv` (name, email, score, source)
-- Sends each lead to Claude for AI-based qualification (not a fixed score threshold — the model reasons about score and source together)
-- Parses the AI's decision and reasoning
-- Writes results to `leads_processed.csv` with two new columns: `ai_decision`, `ai_reason`
-- Handles API failures gracefully without stopping the batch
+## Why LangGraph, not just a script
 
-3. Example
+Retry logic, in most scripts, is a `try/except` wrapped in a `for` loop — buried inside a function, invisible until you read the code. Here it's a first-class part of the graph: a failed API call routes to a `wait_and_retry` node, which loops back to `call_claude`, up to a configurable retry limit, before falling through to a `mark_failed` node.
 
-**Input (`leads.csv`):**
+That structure is the whole point of using a graph over a script: the control flow is explicit, inspectable, and easy to extend — add a human-review node, a second-opinion node, or a Slack-notification node without restructuring the file.
 
-| name | email | score  | source |
+## How it works
+call_claude ──success──> parse_response ──> END
+│
+├──fail, retries left──> wait_and_retry ──> call_claude (loop)
+│
+└──fail, out of retries──> mark_failed ──> END
+1. Reads leads from `leads.csv`
+2. For each lead, runs the graph above via LangGraph
+3. Claude (Haiku 4.5) reasons about the lead's score and source together
+4. Parses the decision and reasoning from the response
+5. Writes results to `leads_processed.csv`, original columns plus `ai_decision` and `ai_reason`
+6. Every step is logged to both console and `run.log`, with timestamps
+
+## Example
+
+**Input**
+
+| name | email | score | source |
+|---|---|---|---|
 | Ion Popescu | ion@firma.ro | 85 | Facebook Ads |
+| Maria Ionescu | maria@firma.ro | 45 | Google Ads |
 | Andrei Stan | andrei@firma.ro | 92 | Referral |
 
-**Output (`leads_processed.csv`):**
+**Output**
 
-| name | ... | ai_decision | ai_reason |
-| Ion Popescu | ... | Qualified | High score indicates strong purchase intent |
-| Andrei Stan | ... | Qualified | High score, referral source indicates strong intent |
+| name | ai_decision | ai_reason |
+|---|---|---|
+| Ion Popescu | Qualified | High score indicates strong purchase intent |
+| Maria Ionescu | Nurture | Low score, needs engagement first |
+| Andrei Stan | Qualified | High score and referral source indicate strong fit |
 
-4. Tech stack
+## Stack
 
 - Python 3.12
-- Anthropic API (Claude Haiku 4.5)
-- CSV processing (standard library)
+- LangGraph — state machine / graph orchestration
+- Anthropic API — Claude Haiku 4.5
+- `argparse` — CLI interface
+- `logging` — structured, timestamped logs to file and console
+- `csv` (standard library)
 
-5. Setup
+## Setup
 
-1. Clone this repo
-2. Create a virtual environment and install dependencies:
-------
+```bash
+git clone https://github.com/iuliantiu/ai-lead-qualifier.git
+cd ai-lead-qualifier
+
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\activate      # Windows
+source .venv/bin/activate   # macOS/Linux
+
 pip install -r requirements.txt
-------
-6. Copy `.env.example` to `.env` and add your Anthropic API key:
+```
+
+Copy `.env.example` to `.env` and add your key:
 ANTHROPIC_API_KEY=your_key_here
-7. Add your leads to `leads.csv` (same columns as the example)
-8. Run:
-oython main.py
+Run with the default files:
 
-########## Roadmap ###########
+```bash
+python main.py
+```
 
-This project is the first step in a larger multi-agent automation system. Planned additions:
-- LangGraph-based multi-step agent workflow
-- Automated email follow-up for qualified leads
-- Database persistence (Supabase/PostgreSQL)
-- API endpoint (FastAPI) for real-time lead scoring
+Or point it at any CSV with the same columns (`name, email, score, source`):
+
+```bash
+python main.py --input other_leads.csv --output results.csv
+```
+
+## Design notes
+
+- **Graph-based retry**: failed API calls route through a dedicated retry node with a configurable delay and attempt limit, rather than a hidden loop inside a function.
+- **Typed state**: the state passed through the graph is a `TypedDict`, so every node knows exactly what fields it can read and write.
+- **Failure isolation**: a lead that exhausts all retries is marked `Error` in the output instead of crashing the batch.
+- **Model choice**: Haiku handles this classification task well and costs a fraction of Sonnet.
+- **No hardcoded thresholds**: qualification logic lives in the prompt, not in an `if` statement — tuning the criteria doesn't require touching the code.
+
+## Roadmap
+
+- [x] LangGraph state machine with retry routing
+- [ ] Multi-agent workflow with CrewAI (e.g. a second agent drafting follow-up copy for qualified leads)
+- [ ] Persistent storage (Supabase/PostgreSQL) instead of CSV in/out
+- [ ] FastAPI endpoint for real-time scoring, callable from a webhook (n8n, GHL, etc.) with a live demo link
+
+## License
+
+MIT
