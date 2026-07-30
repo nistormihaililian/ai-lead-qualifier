@@ -7,6 +7,7 @@ from typing import TypedDict
 from dotenv import load_dotenv
 from anthropic import Anthropic
 from langgraph.graph import StateGraph, END
+from crewai import Agent, Task, Crew
 
 load_dotenv()
 client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
@@ -129,8 +130,32 @@ graph.add_edge("mark_failed", END)
 lead_graph = graph.compile()
 
 
+def write_followup_email(name, source, reason):
+    copywriter = Agent(
+        role="Sales Follow-up Copywriter",
+        goal="Write short, personalized follow-up messages for qualified sales leads",
+        backstory="You are an experienced sales copywriter who writes concise, "
+                   "friendly follow-up emails that get replies, without sounding pushy.",
+        llm="anthropic/claude-haiku-4-5-20251001",
+        verbose=False
+    )
+
+    task = Task(
+        description=f"Write a short follow-up email (max 60 words) for this lead: "
+                     f"Name: {name}, Source: {source}, Qualification reason: {reason}. "
+                     f"Keep it warm, direct, and mention the source naturally.",
+        expected_output="Only the email itself: a subject line followed by the email body. "
+                        "No word count, no notes, no explanations before or after the email.",
+        agent=copywriter
+    )
+
+    crew = Crew(agents=[copywriter], tasks=[task], verbose=False)
+    result = crew.kickoff()
+    return str(result)
+
+
 def parse_args():
-    parser = argparse.ArgumentParser(description="AI Lead Qualifier - qualify sales leads using Claude + LangGraph")
+    parser = argparse.ArgumentParser(description="AI Lead Qualifier - LangGraph + CrewAI")
     parser.add_argument("--input", default="leads.csv", help="Path to the input CSV file (default: leads.csv)")
     parser.add_argument("--output", default="leads_processed.csv", help="Path to the output CSV file (default: leads_processed.csv)")
     return parser.parse_args()
@@ -139,7 +164,7 @@ def parse_args():
 def main():
     args = parse_args()
 
-    logging.info("Starting AI Lead Qualifier run (LangGraph)")
+    logging.info("Starting AI Lead Qualifier run (LangGraph + CrewAI)")
     logging.info(f"Input file: {args.input}")
     logging.info(f"Output file: {args.output}")
 
@@ -168,6 +193,15 @@ def main():
 
         lead["ai_decision"] = final_state["decision"]
         lead["ai_reason"] = final_state["reason"]
+
+        if final_state["decision"] == "Qualified":
+            logging.info(f"Generating follow-up email for {lead['name']}")
+            lead["followup_email"] = write_followup_email(
+                lead["name"], lead["source"], final_state["reason"]
+            )
+        else:
+            lead["followup_email"] = ""
+
         processed_leads.append(lead)
 
     fieldnames = list(processed_leads[0].keys())
