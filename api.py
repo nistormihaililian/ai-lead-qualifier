@@ -300,6 +300,21 @@ def send_slack_notification(name, email, score, source, reason):
         return False
 
 
+def send_outbound_webhook(lead_output: dict):
+    webhook_url = os.getenv("OUTBOUND_WEBHOOK_URL")
+    if not webhook_url:
+        return False
+
+    try:
+        response = requests.post(webhook_url, json=lead_output, timeout=5)
+        response.raise_for_status()
+        logging.info(f"Outbound webhook sent for {lead_output.get('name')}")
+        return True
+    except Exception as error:
+        logging.warning(f"Failed to send outbound webhook: {error}")
+        return False
+
+
 def verify_api_key(x_api_key: str = Header(...)):
     expected_key = os.getenv("API_SECRET_KEY")
     if x_api_key != expected_key:
@@ -373,7 +388,7 @@ def process_lead(lead: LeadInput) -> LeadOutput:
 
     logging.info(f"Saved {lead.name} to Supabase")
 
-    return LeadOutput(
+    output = LeadOutput(
         name=lead.name,
         score=final_state["score"],
         score_reason=final_state["score_reason"],
@@ -382,6 +397,10 @@ def process_lead(lead: LeadInput) -> LeadOutput:
         followup_email=followup_email,
         email_sent=email_sent
     )
+
+    send_outbound_webhook(output.model_dump())
+
+    return output
 
 
 @app.get("/")
