@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import os
 import time
 import logging
+import requests
 from typing import TypedDict
 from dotenv import load_dotenv
 from anthropic import Anthropic
@@ -262,6 +263,40 @@ def send_followup_email(to_email, name, email_content):
         return False
 
 
+def send_slack_notification(name, email, score, source, reason):
+    webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+    if not webhook_url:
+        logging.warning("SLACK_WEBHOOK_URL not set, skipping notification")
+        return False
+
+    message = {
+        "text": f"New Qualified Lead: {name}",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*New Qualified Lead*\n"
+                            f"*Name:* {name}\n"
+                            f"*Email:* {email}\n"
+                            f"*Score:* {score}\n"
+                            f"*Source:* {source}\n"
+                            f"*Reason:* {reason}"
+                }
+            }
+        ]
+    }
+
+    try:
+        response = requests.post(webhook_url, json=message, timeout=5)
+        response.raise_for_status()
+        logging.info(f"Slack notification sent for {name}")
+        return True
+    except Exception as error:
+        logging.warning(f"Failed to send Slack notification for {name}: {error}")
+        return False
+
+
 app = FastAPI(title="AI Lead Qualifier API")
 
 
@@ -314,6 +349,7 @@ def qualify_lead(lead: LeadInput):
         logging.info(f"Generating follow-up email for {lead.name}")
         followup_email = write_followup_email(lead.name, lead.source, final_state["reason"])
         email_sent = send_followup_email(lead.email, lead.name, followup_email)
+        send_slack_notification(lead.name, lead.email, final_state["score"], lead.source, final_state["reason"])
 
     supabase.table("leads").insert({
         "name": lead.name,
@@ -337,6 +373,12 @@ def qualify_lead(lead: LeadInput):
         followup_email=followup_email,
         email_sent=email_sent
     )
+
+
+@app.get("/leads")
+def get_leads():
+    response = supabase.table("leads").select("*").order("created_at", desc=True).execute()
+    return response.data
 
 
 @app.get("/form", response_class=HTMLResponse)
@@ -493,6 +535,194 @@ form.addEventListener("submit", async function (e) {
     submitBtn.disabled = false;
     submitBtn.textContent = "Submit";
 });
+</script>
+
+</body>
+</html>
+"""
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def serve_dashboard():
+    return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lead Dashboard</title>
+<style>
+    body {
+        font-family: Arial, sans-serif;
+        max-width: 1000px;
+        margin: 40px auto;
+        padding: 20px;
+        background: #f5f5f5;
+    }
+    h1 {
+        font-size: 22px;
+        margin-bottom: 20px;
+    }
+    .controls {
+        margin-bottom: 16px;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+    }
+    select {
+        padding: 6px 10px;
+        border-radius: 4px;
+        border: 1px solid #ccc;
+    }
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        background: white;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    th, td {
+        text-align: left;
+        padding: 10px 12px;
+        border-bottom: 1px solid #eee;
+        font-size: 14px;
+    }
+    th {
+        background: #222;
+        color: white;
+        cursor: pointer;
+        user-select: none;
+    }
+    th:hover {
+        background: #444;
+    }
+    tr:hover {
+        background: #fafafa;
+    }
+    .badge {
+        padding: 3px 8px;
+        border-radius: 10px;
+        font-size: 12px;
+        font-weight: bold;
+    }
+    .badge.qualified {
+        background: #e6f4ea;
+        color: #34a853;
+    }
+    .badge.nurture {
+        background: #fef7e0;
+        color: #b06000;
+    }
+    .badge.error {
+        background: #fce8e6;
+        color: #ea4335;
+    }
+    #loading {
+        padding: 20px;
+        color: #666;
+    }
+</style>
+</head>
+<body>
+
+<h1>Lead Dashboard</h1>
+
+<div class="controls">
+    <label for="filterSelect">Filter:</label>
+    <select id="filterSelect">
+        <option value="all">All</option>
+        <option value="Qualified">Qualified</option>
+        <option value="Nurture">Nurture</option>
+    </select>
+</div>
+
+<div id="loading">Loading leads...</div>
+<table id="leadsTable" style="display: none;">
+    <thead>
+        <tr>
+            <th data-key="name">Name</th>
+            <th data-key="email">Email</th>
+            <th data-key="score">Score &#8645;</th>
+            <th data-key="source">Source</th>
+            <th data-key="ai_decision">Decision</th>
+            <th data-key="ai_reason">Reason</th>
+            <th data-key="email_sent">Email Sent</th>
+            <th data-key="created_at">Date &#8645;</th>
+        </tr>
+    </thead>
+    <tbody id="leadsBody"></tbody>
+</table>
+
+<script>
+let allLeads = [];
+let sortKey = "created_at";
+let sortAsc = false;
+
+async function loadLeads() {
+    const response = await fetch("/leads");
+    allLeads = await response.json();
+    document.getElementById("loading").style.display = "none";
+    document.getElementById("leadsTable").style.display = "table";
+    renderTable();
+}
+
+function renderTable() {
+    const filterValue = document.getElementById("filterSelect").value;
+    let leads = allLeads;
+
+    if (filterValue !== "all") {
+        leads = leads.filter(l => l.ai_decision === filterValue);
+    }
+
+    leads = leads.slice().sort((a, b) => {
+        let valA = a[sortKey];
+        let valB = b[sortKey];
+        if (valA === null || valA === undefined) valA = "";
+        if (valB === null || valB === undefined) valB = "";
+        if (valA < valB) return sortAsc ? -1 : 1;
+        if (valA > valB) return sortAsc ? 1 : -1;
+        return 0;
+    });
+
+    const tbody = document.getElementById("leadsBody");
+    tbody.innerHTML = "";
+
+    leads.forEach(lead => {
+        const row = document.createElement("tr");
+
+        const decisionClass = lead.ai_decision === "Qualified" ? "qualified" :
+                               lead.ai_decision === "Nurture" ? "nurture" : "error";
+
+        const dateStr = lead.created_at ? new Date(lead.created_at).toLocaleString() : "";
+
+        row.innerHTML = `
+            <td>${lead.name || ""}</td>
+            <td>${lead.email || ""}</td>
+            <td>${lead.score ?? ""}</td>
+            <td>${lead.source || ""}</td>
+            <td><span class="badge ${decisionClass}">${lead.ai_decision || ""}</span></td>
+            <td>${lead.ai_reason || ""}</td>
+            <td>${lead.email_sent ? "Yes" : "No"}</td>
+            <td>${dateStr}</td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+document.getElementById("filterSelect").addEventListener("change", renderTable);
+
+document.querySelectorAll("th[data-key]").forEach(th => {
+    th.addEventListener("click", () => {
+        const key = th.getAttribute("data-key");
+        if (sortKey === key) {
+            sortAsc = !sortAsc;
+        } else {
+            sortKey = key;
+            sortAsc = true;
+        }
+        renderTable();
+    });
+});
+
+loadLeads();
 </script>
 
 </body>
