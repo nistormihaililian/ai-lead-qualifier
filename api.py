@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Header, HTTPException, Depends
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import os
@@ -12,6 +12,9 @@ from langgraph.graph import StateGraph, END
 from supabase import create_client
 from crewai import Agent, Task, Crew
 import resend
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 load_dotenv()
 
@@ -297,7 +300,19 @@ def send_slack_notification(name, email, score, source, reason):
         return False
 
 
+def verify_api_key(x_api_key: str = Header(...)):
+    expected_key = os.getenv("API_SECRET_KEY")
+    if x_api_key != expected_key:
+        logging.warning("Rejected request with invalid API key")
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    return x_api_key
+
+
 app = FastAPI(title="AI Lead Qualifier API")
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 class LeadInput(BaseModel):
@@ -317,13 +332,7 @@ class LeadOutput(BaseModel):
     email_sent: bool = False
 
 
-@app.get("/")
-def read_root():
-    return {"message": "AI Lead Qualifier API is running"}
-
-
-@app.post("/qualify", response_model=LeadOutput)
-def qualify_lead(lead: LeadInput):
+def process_lead(lead: LeadInput) -> LeadOutput:
     initial_state: LeadState = {
         "name": lead.name,
         "email": lead.email,
@@ -373,6 +382,23 @@ def qualify_lead(lead: LeadInput):
         followup_email=followup_email,
         email_sent=email_sent
     )
+
+
+@app.get("/")
+def read_root():
+    return {"message": "AI Lead Qualifier API is running"}
+
+
+@app.post("/qualify", response_model=LeadOutput)
+@limiter.limit("10/hour")
+def qualify_lead(request: Request, lead: LeadInput, api_key: str = Depends(verify_api_key)):
+    return process_lead(lead)
+
+
+@app.post("/submit-lead", response_model=LeadOutput)
+@limiter.limit("10/hour")
+def submit_lead(request: Request, lead: LeadInput):
+    return process_lead(lead)
 
 
 @app.get("/leads")
@@ -495,11 +521,20 @@ form.addEventListener("submit", async function (e) {
     };
 
     try {
-        const response = await fetch("/qualify", {
+        const response = await fetch("/submit-lead", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload)
         });
+
+        if (response.status === 429) {
+            resultDiv.style.display = "block";
+            resultDiv.className = "error";
+            resultDiv.textContent = "Too many submissions. Please try again later.";
+            submitBtn.disabled = false;
+            submitBtn.textContent = "Submit";
+            return;
+        }
 
         const data = await response.json();
 
