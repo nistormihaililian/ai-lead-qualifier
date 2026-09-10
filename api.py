@@ -5,6 +5,7 @@ import os
 import time
 import logging
 import requests
+from datetime import datetime, timezone
 from typing import TypedDict
 from dotenv import load_dotenv
 from anthropic import Anthropic
@@ -28,6 +29,7 @@ resend.api_key = os.getenv("RESEND_API_KEY")
 
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 2
+MAX_SUBMISSIONS_PER_IP = 3
 
 logging.basicConfig(
     level=logging.INFO,
@@ -323,6 +325,33 @@ def verify_api_key(x_api_key: str = Header(...)):
     return x_api_key
 
 
+def get_client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host
+
+
+def check_and_increment_ip_usage(ip_address: str) -> bool:
+    result = supabase.table("ip_usage").select("submission_count").eq("ip_address", ip_address).execute()
+
+    if result.data:
+        count = result.data[0]["submission_count"]
+        if count >= MAX_SUBMISSIONS_PER_IP:
+            return False
+        supabase.table("ip_usage").update({
+            "submission_count": count + 1,
+            "last_submission": datetime.now(timezone.utc).isoformat()
+        }).eq("ip_address", ip_address).execute()
+    else:
+        supabase.table("ip_usage").insert({
+            "ip_address": ip_address,
+            "submission_count": 1
+        }).execute()
+
+    return True
+
+
 app = FastAPI(title="AI Lead Qualifier API")
 
 limiter = Limiter(key_func=get_remote_address)
@@ -417,6 +446,12 @@ def qualify_lead(request: Request, lead: LeadInput, api_key: str = Depends(verif
 @app.post("/submit-lead", response_model=LeadOutput)
 @limiter.limit("10/hour")
 def submit_lead(request: Request, lead: LeadInput):
+    client_ip = get_client_ip(request)
+    if not check_and_increment_ip_usage(client_ip):
+        raise HTTPException(
+            status_code=429,
+            detail="You've reached the maximum number of free submissions from this location."
+        )
     return process_lead(lead)
 
 
@@ -547,9 +582,10 @@ form.addEventListener("submit", async function (e) {
         });
 
         if (response.status === 429) {
+            const errorData = await response.json();
             resultDiv.style.display = "block";
             resultDiv.className = "error";
-            resultDiv.textContent = "Too many submissions. Please try again later.";
+            resultDiv.textContent = errorData.detail || "Too many submissions. Please try again later.";
             submitBtn.disabled = false;
             submitBtn.textContent = "Submit";
             return;
