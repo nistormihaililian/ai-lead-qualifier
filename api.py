@@ -46,6 +46,9 @@ class LeadState(TypedDict):
     email: str
     source: str
     message: str
+    email_type: str
+    email_confidence: int
+    email_reason: str
     raw_score_response: str
     score: int
     score_reason: str
@@ -56,6 +59,48 @@ class LeadState(TypedDict):
     reason: str
     attempt: int
     failed: bool
+
+
+def analyze_email_domain(email, name, message):
+    analyst = Agent(
+        role="Lead Verification & Domain Intelligence Analyst",
+        goal="Assess whether a lead's email address signals genuine business intent "
+             "or is a low-commitment personal or disposable address",
+        backstory="You are an experienced lead-quality analyst who has reviewed thousands of B2B leads. "
+                   "You know which providers are personal (gmail, yahoo, hotmail, outlook, icloud, proton), "
+                   "which patterns suggest disposable or temporary emails (tempmail, mailinator, "
+                   "guerrillamail, 10minutemail, random character strings, throwaway domains), "
+                   "and which patterns look like real company domains.",
+        llm="anthropic/claude-haiku-4-5-20251001",
+        verbose=False
+    )
+
+    task = Task(
+        description=f"Analyze this lead's email address for business legitimacy signals.\n\n"
+                     f"Name: {name}\n"
+                     f"Email: {email}\n"
+                     f"Message context: \"{message}\"\n\n"
+                     f"Classify the email and explain your reasoning briefly.",
+        expected_output="Only one line in this exact format, nothing else: "
+                         "TYPE: <business or personal or disposable> | CONFIDENCE: <0-100> | REASON: <short reason, max 12 words>",
+        agent=analyst
+    )
+
+    crew = Crew(agents=[analyst], tasks=[task], verbose=False)
+    result = crew.kickoff()
+    return str(result)
+
+
+def parse_email_analysis(raw_text):
+    try:
+        parts = raw_text.strip().split("|")
+        email_type = parts[0].replace("TYPE:", "").strip().lower()
+        confidence = int(parts[1].replace("CONFIDENCE:", "").strip())
+        reason = parts[2].replace("REASON:", "").strip()
+        return email_type, confidence, reason
+    except Exception as error:
+        logging.warning(f"Failed to parse email analysis: {error}")
+        return "unknown", 0, "Could not parse email domain analysis"
 
 
 def score_lead(state: LeadState) -> LeadState:
@@ -69,7 +114,15 @@ Name: {state['name']}
 Source: {state['source']}
 Message: "{state['message']}"
 
+Email domain analysis (from a separate verification agent):
+Type: {state['email_type']} (confidence: {state['email_confidence']})
+Reason: {state['email_reason']}
+
 Analyze the message for buying intent, urgency, and budget signals.
+Factor in the email domain analysis: a business email is a stronger signal of serious intent,
+a disposable email is a red flag that should lower the score significantly, a personal email
+(gmail, yahoo, etc.) is neutral and common for individual consumers.
+
 Reply with ONLY one line in this exact format:
 SCORE: <a number from 0 to 100> | REASON: <short reason, max 12 words>
 """
@@ -135,9 +188,11 @@ Lead info:
 Name: {state['name']}
 Message: "{state['message']}"
 Score: {state['score']} (reason: {state['score_reason']})
+Email type: {state['email_type']} (reason: {state['email_reason']})
 Source: {state['source']}
 
 Decide if this lead is qualified for sales follow-up or should go to a nurture sequence.
+A disposable email is a strong signal against qualifying, regardless of message content.
 Reply with ONLY one line in this exact format:
 DECISION: <Qualified or Nurture> | REASON: <short reason, max 10 words>
 """
@@ -372,16 +427,27 @@ class LeadOutput(BaseModel):
     score_reason: str
     decision: str
     reason: str
+    email_type: str = ""
+    email_confidence: int = 0
+    email_reason: str = ""
     followup_email: str = ""
     email_sent: bool = False
 
 
 def process_lead(lead: LeadInput) -> LeadOutput:
+    logging.info(f"Analyzing email domain for {lead.name}")
+    raw_email_analysis = analyze_email_domain(lead.email, lead.name, lead.message)
+    email_type, email_confidence, email_reason = parse_email_analysis(raw_email_analysis)
+    logging.info(f"Email analysis for {lead.name} -> {email_type} ({email_confidence}) | {email_reason}")
+
     initial_state: LeadState = {
         "name": lead.name,
         "email": lead.email,
         "source": lead.source,
         "message": lead.message,
+        "email_type": email_type,
+        "email_confidence": email_confidence,
+        "email_reason": email_reason,
         "raw_score_response": "",
         "score": 0,
         "score_reason": "",
@@ -411,6 +477,9 @@ def process_lead(lead: LeadInput) -> LeadOutput:
         "source": lead.source,
         "ai_decision": final_state["decision"],
         "ai_reason": final_state["reason"],
+        "email_type": email_type,
+        "email_confidence": email_confidence,
+        "email_reason": email_reason,
         "followup_email": followup_email if followup_email else None,
         "email_sent": email_sent
     }).execute()
@@ -423,6 +492,9 @@ def process_lead(lead: LeadInput) -> LeadOutput:
         score_reason=final_state["score_reason"],
         decision=final_state["decision"],
         reason=final_state["reason"],
+        email_type=email_type,
+        email_confidence=email_confidence,
+        email_reason=email_reason,
         followup_email=followup_email,
         email_sent=email_sent
     )
@@ -605,6 +677,7 @@ form.addEventListener("submit", async function (e) {
         }
 
         let html = "<strong>Score:</strong> " + data.score + " (" + data.score_reason + ")<br>";
+        html += "<strong>Email type:</strong> " + data.email_type + " (" + data.email_confidence + "% confidence) - " + data.email_reason + "<br>";
         html += "<strong>Decision:</strong> " + data.decision + "<br>";
         html += "<strong>Reason:</strong> " + data.reason;
 
@@ -643,7 +716,7 @@ def serve_dashboard():
 <style>
     body {
         font-family: Arial, sans-serif;
-        max-width: 1000px;
+        max-width: 1100px;
         margin: 40px auto;
         padding: 20px;
         background: #f5f5f5;
@@ -673,7 +746,7 @@ def serve_dashboard():
         text-align: left;
         padding: 10px 12px;
         border-bottom: 1px solid #eee;
-        font-size: 14px;
+        font-size: 13px;
     }
     th {
         background: #222;
@@ -705,6 +778,18 @@ def serve_dashboard():
         background: #fce8e6;
         color: #ea4335;
     }
+    .badge.business {
+        background: #e8f0fe;
+        color: #1a73e8;
+    }
+    .badge.personal {
+        background: #f1f3f4;
+        color: #5f6368;
+    }
+    .badge.disposable {
+        background: #fce8e6;
+        color: #ea4335;
+    }
     #loading {
         padding: 20px;
         color: #666;
@@ -731,10 +816,11 @@ def serve_dashboard():
             <th data-key="name">Name</th>
             <th data-key="email">Email</th>
             <th data-key="score">Score &#8645;</th>
+            <th data-key="email_type">Email Type</th>
             <th data-key="source">Source</th>
             <th data-key="ai_decision">Decision</th>
             <th data-key="ai_reason">Reason</th>
-            <th data-key="email_sent">Email Sent</th>
+            <th data-key="email_sent">Follow-up Sent</th>
             <th data-key="created_at">Date &#8645;</th>
         </tr>
     </thead>
@@ -781,12 +867,16 @@ function renderTable() {
         const decisionClass = lead.ai_decision === "Qualified" ? "qualified" :
                                lead.ai_decision === "Nurture" ? "nurture" : "error";
 
+        const emailTypeClass = lead.email_type === "business" ? "business" :
+                                lead.email_type === "disposable" ? "disposable" : "personal";
+
         const dateStr = lead.created_at ? new Date(lead.created_at).toLocaleString() : "";
 
         row.innerHTML = `
             <td>${lead.name || ""}</td>
             <td>${lead.email || ""}</td>
             <td>${lead.score ?? ""}</td>
+            <td><span class="badge ${emailTypeClass}">${lead.email_type || ""}</span></td>
             <td>${lead.source || ""}</td>
             <td><span class="badge ${decisionClass}">${lead.ai_decision || ""}</span></td>
             <td>${lead.ai_reason || ""}</td>
